@@ -353,6 +353,7 @@ type DnsDiscovery struct {
 	handle       *pcap.Handle           // 数据包捕获句柄
 	captureMutex sync.Mutex             // 数据包捕获互斥锁
 	stopChan     chan struct{}          // 停止信号通道
+	stopOnce     sync.Once              // 确保停止操作只执行一次
 	resultChan   chan *DnsResult        // 结果通道
 	packetSource *gopacket.PacketSource // 数据包源
 	logger       Logger                 // 日志记录器
@@ -790,7 +791,19 @@ func (d *DnsDiscovery) sendDnsQuery(domain string, sourcePort int) error {
 		return nil
 	}
 	// 发送 DNS 请求包
+	d.captureMutex.Lock()
+	if d.handle == nil {
+		d.captureMutex.Unlock()
+		// handle 已关闭，移除查询映射
+		d.queryMapMutex.Lock()
+		delete(d.queryMap, dnsID)
+		d.queryMapMutex.Unlock()
+		d.removeRequestFromCache(domain)
+		return fmt.Errorf("handle is closed")
+	}
 	err = d.handle.WritePacketData(buffer.Bytes())
+	d.captureMutex.Unlock()
+	
 	if err != nil {
 		// 发送失败，移除查询映射
 		d.queryMapMutex.Lock()
@@ -1028,16 +1041,10 @@ func (d *DnsDiscovery) retryQuery(domain string, sourcePort int) {
 
 // Stop 停止DNS发现
 func (d *DnsDiscovery) Stop() {
-	// 发送停止信号
-	select {
-	case <-d.stopChan:
-		// 通道已关闭，无需重复关闭
-	default:
+	// 使用 sync.Once 确保只关闭一次
+	d.stopOnce.Do(func() {
 		close(d.stopChan)
-	}
-
-	// 创建新的停止通道，以便后续扫描
-	d.stopChan = make(chan struct{})
+	})
 }
 
 // Close 关闭DNS发现，释放资源
