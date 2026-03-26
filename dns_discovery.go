@@ -532,6 +532,9 @@ func (d *DnsDiscovery) CheckWildcard(domain string) bool {
 	randomDomain := generateDomain()
 	d.logger.Debug("测试随机域名: %s", randomDomain)
 	result := d.ScanWithDomains([]string{randomDomain + "." + domain})
+	for _, r := range result {
+		d.logger.Debug("子域名:%s，IP:%v，CNAME:%s", r.Domain, r.IP, r.CNAME)
+	}
 	if len(result) == 0 {
 		return false
 	}

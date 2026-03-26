@@ -2,61 +2,19 @@ package subdomain
 
 import (
 	"fmt"
+	"github.com/projectdiscovery/gologger"
+	"github.com/projectdiscovery/gologger/levels"
 	"github.com/stretchr/testify/assert"
 	"sync"
 	"testing"
 	"time"
 )
 
-// TestLogger 测试用的Logger实现
-type TestLogger struct {
-	t *testing.T
-}
-
-// NewTestLogger 创建一个测试用的Logger
-func NewTestLogger(t *testing.T) *TestLogger {
-	return &TestLogger{t: t}
-}
-
-// Debug 输出调试级别日志
-func (l *TestLogger) Debug(format string, args ...interface{}) {
-	l.t.Logf("[DEBUG] "+format, args...)
-}
-
-// Info 输出信息级别日志
-func (l *TestLogger) Info(format string, args ...interface{}) {
-	l.t.Logf("[INFO] "+format, args...)
-}
-
-// Warning 输出警告级别日志
-func (l *TestLogger) Warning(format string, args ...interface{}) {
-	l.t.Logf("[WARN] "+format, args...)
-}
-
-// Error 输出错误级别日志
-func (l *TestLogger) Error(format string, args ...interface{}) {
-	l.t.Logf("[ERROR] "+format, args...)
-}
-
-func TestWildcard(t *testing.T) {
-	// 创建DNS发现实例并使用测试logger
-	testLogger := NewTestLogger(t)
-	discovery := NewDnsDiscovery(
-		WithLogger(testLogger),
-	)
-	defer discovery.Close()
-
-	// 测试通配符检测
-	isWildcard := discovery.CheckWildcard("fang.com")
-	assert.True(t, isWildcard)
-}
-
 // TestSingleDomainScan 测试扫描单个目标域名
 func TestSingleDomainScan(t *testing.T) {
 	// 创建DNS发现实例并使用测试logger
-	testLogger := NewTestLogger(t)
 	discovery := NewDnsDiscovery(
-		WithLogger(testLogger),
+		WithLogger(NewDefaultLogger()),
 	)
 	defer discovery.Close()
 
@@ -83,11 +41,10 @@ func TestRateLimit(t *testing.T) {
 	limiter := NewTokenBucketLimiter(lowRate, lowRate)
 
 	// 创建使用低速率限制器的DNS发现实例并使用测试logger
-	testLogger := NewTestLogger(t)
 	discovery := NewDnsDiscovery(
 		WithRateLimiter(limiter),
 		WithTimeout(time.Second*10),
-		WithLogger(testLogger),
+		WithLogger(NewDefaultLogger()),
 	)
 	defer discovery.Close()
 
@@ -120,9 +77,8 @@ func TestRateLimit(t *testing.T) {
 // TestCallbackFunction 测试回调函数功能
 func TestCallbackFunction(t *testing.T) {
 	// 创建DNS发现实例并使用测试logger
-	testLogger := NewTestLogger(t)
 	discovery := NewDnsDiscovery(
-		WithLogger(testLogger),
+		WithLogger(NewDefaultLogger()),
 	)
 	defer discovery.Close()
 
@@ -165,9 +121,8 @@ func TestCallbackFunction(t *testing.T) {
 // TestConcurrentScans 测试多个扫描任务的结果隔离
 func TestConcurrentScans(t *testing.T) {
 	// 创建DNS发现实例并使用测试logger
-	testLogger := NewTestLogger(t)
 	discovery := NewDnsDiscovery(
-		WithLogger(testLogger),
+		WithLogger(NewDefaultLogger()),
 	)
 	defer discovery.Close()
 
@@ -234,4 +189,11 @@ func contains(domain, parent string) bool {
 	lenDomain := len(domain)
 	lenParent := len(parent)
 	return lenDomain > lenParent && domain[lenDomain-lenParent:] == parent
+}
+
+func TestWiWildcard(t *testing.T) {
+	gologger.DefaultLogger.SetMaxLevel(levels.LevelDebug)
+	discover := NewDnsDiscovery(WithDnsServers([]string{"8.8.8.8"}), WithLogger(NewDefaultLogger()))
+	ret := discover.CheckWildcard("fang.com")
+	assert.Equal(t, true, ret)
 }
