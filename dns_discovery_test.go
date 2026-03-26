@@ -12,6 +12,9 @@ import (
 
 // TestSingleDomainScan 测试扫描单个目标域名
 func TestSingleDomainScan(t *testing.T) {
+	if testing.Short() {
+		t.Skip("跳过需要网络接口的测试")
+	}
 	// 创建DNS发现实例并使用测试logger
 	discovery := NewDnsDiscovery(
 		WithLogger(NewDefaultLogger()),
@@ -36,6 +39,9 @@ func TestSingleDomainScan(t *testing.T) {
 
 // TestRateLimit 测试速率限制功能
 func TestRateLimit(t *testing.T) {
+	if testing.Short() {
+		t.Skip("跳过需要网络接口的测试")
+	}
 	// 创建低速率的限制器
 	lowRate := 10 // 每秒10个请求
 	limiter := NewTokenBucketLimiter(lowRate, lowRate)
@@ -76,6 +82,9 @@ func TestRateLimit(t *testing.T) {
 
 // TestCallbackFunction 测试回调函数功能
 func TestCallbackFunction(t *testing.T) {
+	if testing.Short() {
+		t.Skip("跳过需要网络接口的测试")
+	}
 	// 创建DNS发现实例并使用测试logger
 	discovery := NewDnsDiscovery(
 		WithLogger(NewDefaultLogger()),
@@ -120,6 +129,9 @@ func TestCallbackFunction(t *testing.T) {
 
 // TestConcurrentScans 测试多个扫描任务的结果隔离
 func TestConcurrentScans(t *testing.T) {
+	if testing.Short() {
+		t.Skip("跳过需要网络接口的测试")
+	}
 	// 创建DNS发现实例并使用测试logger
 	discovery := NewDnsDiscovery(
 		WithLogger(NewDefaultLogger()),
@@ -192,6 +204,9 @@ func contains(domain, parent string) bool {
 }
 
 func TestWiWildcard(t *testing.T) {
+	if testing.Short() {
+		t.Skip("跳过需要网络接口的测试")
+	}
 	gologger.DefaultLogger.SetMaxLevel(levels.LevelDebug)
 	discover := NewDnsDiscovery(WithDnsServers([]string{"8.8.8.8"}), WithLogger(NewDefaultLogger()))
 	ret := discover.CheckWildcard("fang.com")

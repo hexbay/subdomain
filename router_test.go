@@ -7,6 +7,9 @@ import (
 )
 
 func TestGetInterfaceByDstIP(t *testing.T) {
+	if testing.Short() {
+		t.Skip("跳过需要网络接口的测试")
+	}
 	ifaceName, localIP, localMAC, gatewayMAC, err := getLocalRouteInfo("1.1.1.1")
 	assert.NoError(t, err)
 	assert.NotNil(t, localIP)
