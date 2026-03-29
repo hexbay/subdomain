@@ -14,12 +14,20 @@ import (
 
 const DNsType = "a"
 
+// DNSRecord 表示单条 DNS 记录
+type DNSRecord struct {
+	Type  string `json:"type"`            // 记录类型: A, AAAA, CNAME, MX, NS, TXT, SOA 等
+	Value string `json:"value"`           // 记录值
+	TTL   uint32 `json:"ttl,omitempty"`   // TTL 值
+}
+
 // DnsResult 表示DNS查询结果
 type DnsResult struct {
-	Domain  string   `json:"domain"`             // 域名
-	IP      []string `json:"ip"`                 // IP地址
-	CNAME   string   `json:"cname,omitempty"`    // CNAME记录
-	QueryID uint16   `json:"query_id,omitempty"` // DNS查询ID，用于关联请求和响应
+	Domain  string       `json:"domain"`             // 域名
+	IP      []string     `json:"ip,omitempty"`       // IP地址（兼容旧版本）
+	CNAME   string       `json:"cname,omitempty"`    // CNAME记录（兼容旧版本）
+	Records []DNSRecord  `json:"records,omitempty"`  // 所有 DNS 记录
+	QueryID uint16       `json:"query_id,omitempty"` // DNS查询ID，用于关联请求和响应
 }
 
 // DomainCallback 定义发现域名时的回调函数类型
@@ -350,6 +358,7 @@ type DnsDiscovery struct {
 	rateLimiter  RateLimiter            // 速率限制器
 	dnsServers   []net.IP               // DNS服务器IP地址
 	timeout      time.Duration          // 超时时间
+	queryTypes   []layers.DNSType       // 查询的 DNS 记录类型
 	handle       *pcap.Handle           // 数据包捕获句柄
 	captureMutex sync.Mutex             // 数据包捕获互斥锁
 	stopChan     chan struct{}          // 停止信号通道
@@ -396,6 +405,7 @@ func NewDnsDiscovery(options ...DnsDiscoveryOption) *DnsDiscovery {
 		rateLimiter: NewTokenBucketLimiter(1000, 1000), // 默认每秒1000个请求
 		dnsServers:  []net.IP{net.ParseIP("8.8.8.8"), net.ParseIP("1.1.1.1")},
 		timeout:     time.Second * 5,
+		queryTypes:  []layers.DNSType{layers.DNSTypeA}, // 默认只查询 A 记录
 
 		captureMutex: sync.Mutex{},
 		stopChan:     make(chan struct{}),
@@ -454,6 +464,16 @@ func WithTimeout(timeout time.Duration) DnsDiscoveryOption {
 func WithLogger(logger Logger) DnsDiscoveryOption {
 	return func(d *DnsDiscovery) {
 		d.logger = logger
+	}
+}
+
+// WithQueryTypes 设置要查询的 DNS 记录类型
+// 支持的类型: A, AAAA, CNAME, MX, NS, TXT, SOA, PTR 等
+func WithQueryTypes(types []layers.DNSType) DnsDiscoveryOption {
+	return func(d *DnsDiscovery) {
+		if len(types) > 0 {
+			d.queryTypes = types
+		}
 	}
 }
 
@@ -718,14 +738,64 @@ func (d *DnsDiscovery) capturePackets() {
 				d.queryMapMutex.RLock()
 				d.queryMapMutex.RUnlock()
 
-				// 解析IP地址
+				// 解析 DNS 记录
 				switch answer.Type {
 				case layers.DNSTypeA:
-					result.IP = append(result.IP, answer.IP.String())
+					ipStr := answer.IP.String()
+					result.IP = append(result.IP, ipStr)
+					result.Records = append(result.Records, DNSRecord{
+						Type:  "A",
+						Value: ipStr,
+						TTL:   answer.TTL,
+					})
 				case layers.DNSTypeAAAA:
-					result.IP = append(result.IP, answer.IP.String())
+					ipStr := answer.IP.String()
+					result.IP = append(result.IP, ipStr)
+					result.Records = append(result.Records, DNSRecord{
+						Type:  "AAAA",
+						Value: ipStr,
+						TTL:   answer.TTL,
+					})
 				case layers.DNSTypeCNAME:
-					result.CNAME = string(answer.CNAME)
+					cnameStr := string(answer.CNAME)
+					result.CNAME = cnameStr
+					result.Records = append(result.Records, DNSRecord{
+						Type:  "CNAME",
+						Value: cnameStr,
+						TTL:   answer.TTL,
+					})
+				case layers.DNSTypeMX:
+					result.Records = append(result.Records, DNSRecord{
+						Type:  "MX",
+						Value: string(answer.MX.Name),
+						TTL:   answer.TTL,
+					})
+				case layers.DNSTypeNS:
+					result.Records = append(result.Records, DNSRecord{
+						Type:  "NS",
+						Value: string(answer.NS),
+						TTL:   answer.TTL,
+					})
+				case layers.DNSTypeTXT:
+					for _, txt := range answer.TXTs {
+						result.Records = append(result.Records, DNSRecord{
+							Type:  "TXT",
+							Value: string(txt),
+							TTL:   answer.TTL,
+						})
+					}
+				case layers.DNSTypeSOA:
+					result.Records = append(result.Records, DNSRecord{
+						Type:  "SOA",
+						Value: string(answer.SOA.MName),
+						TTL:   answer.TTL,
+					})
+				case layers.DNSTypePTR:
+					result.Records = append(result.Records, DNSRecord{
+						Type:  "PTR",
+						Value: string(answer.PTR),
+						TTL:   answer.TTL,
+					})
 				}
 
 				// 将结果发送到收集器
@@ -741,111 +811,86 @@ func (d *DnsDiscovery) sendDnsQuery(domain string, sourcePort int) error {
 	if d.rateLimiter != nil {
 		d.rateLimiter.Wait()
 	}
-	// 为当前任务生成一个唯一的DNS查询ID
-	dnsID := uint16(time.Now().UnixNano() & 0xFFFF)
-	// 保存查询映射
-	d.queryMapMutex.Lock()
-	d.queryMap[dnsID] = fmt.Sprintf("%d", sourcePort)
-	d.queryMapMutex.Unlock()
-	// 发送DNS查询
-	serverIndex := 0
-	dnsServer := d.dnsServers[serverIndex%len(d.dnsServers)]
-	// UDP layer
-	udp := &layers.UDP{
-		SrcPort: layers.UDPPort(sourcePort),
-		DstPort: layers.UDPPort(53),
-	}
-	dns := &layers.DNS{
-		ID:      dnsID,
-		QDCount: 1,
-		RD:      true, //递归查询标识
-	}
-	ipLayer := &layers.IPv4{
-		Version:  4,
-		TTL:      64,
-		Protocol: layers.IPProtocolUDP,
-		SrcIP:    d.sourceIP,
-		DstIP:    dnsServer,
-	}
-	dns.Questions = append(dns.Questions,
-		layers.DNSQuestion{
-			Name:  []byte(domain),
-			Type:  layers.DNSTypeA,
-			Class: layers.DNSClassIN,
-		})
-	_ = udp.SetNetworkLayerForChecksum(ipLayer)
-	buffer := gopacket.NewSerializeBuffer()
-	opts := gopacket.SerializeOptions{
-		FixLengths:       true,
-		ComputeChecksums: true,
-	}
-	err := gopacket.SerializeLayers(buffer, opts, d.ethLayer, ipLayer, udp, dns)
-	if err != nil {
-		d.logger.Warning("dns_discovery.go:subdomain:sendDnsQuery: %s", err)
-		// 发送失败，移除查询映射
-		d.queryMapMutex.Lock()
-		delete(d.queryMap, dnsID)
-		d.queryMapMutex.Unlock()
-		// 从请求缓存中移除
-		d.removeRequestFromCache(domain)
-		return nil
-	}
-	// 发送 DNS 请求包
-	d.captureMutex.Lock()
-	if d.handle == nil {
-		d.captureMutex.Unlock()
-		// handle 已关闭，移除查询映射
-		d.queryMapMutex.Lock()
-		delete(d.queryMap, dnsID)
-		d.queryMapMutex.Unlock()
-		d.removeRequestFromCache(domain)
-		return fmt.Errorf("handle is closed")
-	}
-	err = d.handle.WritePacketData(buffer.Bytes())
-	d.captureMutex.Unlock()
 	
-	if err != nil {
-		// 发送失败，移除查询映射
+	// 为每种查询类型发送请求
+	for _, queryType := range d.queryTypes {
+		// 为当前任务生成一个唯一的DNS查询ID
+		dnsID := uint16(time.Now().UnixNano() & 0xFFFF)
+		// 保存查询映射
 		d.queryMapMutex.Lock()
-		delete(d.queryMap, dnsID)
+		d.queryMap[dnsID] = fmt.Sprintf("%d", sourcePort)
 		d.queryMapMutex.Unlock()
-		// 从请求缓存中移除
-		d.removeRequestFromCache(domain)
-		return nil
+		
+		// 发送DNS查询
+		serverIndex := 0
+		dnsServer := d.dnsServers[serverIndex%len(d.dnsServers)]
+		// UDP layer
+		udp := &layers.UDP{
+			SrcPort: layers.UDPPort(sourcePort),
+			DstPort: layers.UDPPort(53),
+		}
+		dns := &layers.DNS{
+			ID:      dnsID,
+			QDCount: 1,
+			RD:      true, //递归查询标识
+		}
+		ipLayer := &layers.IPv4{
+			Version:  4,
+			TTL:      64,
+			Protocol: layers.IPProtocolUDP,
+			SrcIP:    d.sourceIP,
+			DstIP:    dnsServer,
+		}
+		dns.Questions = append(dns.Questions,
+			layers.DNSQuestion{
+				Name:  []byte(domain),
+				Type:  queryType,
+				Class: layers.DNSClassIN,
+			})
+		_ = udp.SetNetworkLayerForChecksum(ipLayer)
+		
+		buffer := gopacket.NewSerializeBuffer()
+		opts := gopacket.SerializeOptions{
+			FixLengths:       true,
+			ComputeChecksums: true,
+		}
+		err := gopacket.SerializeLayers(buffer, opts, d.ethLayer, ipLayer, udp, dns)
+		if err != nil {
+			d.logger.Warning("dns_discovery.go:subdomain:sendDnsQuery: %s", err)
+			// 发送失败，移除查询映射
+			d.queryMapMutex.Lock()
+			delete(d.queryMap, dnsID)
+			d.queryMapMutex.Unlock()
+			// 从请求缓存中移除
+			d.removeRequestFromCache(domain)
+			continue
+		}
+		
+		// 发送 DNS 请求包
+		d.captureMutex.Lock()
+		if d.handle == nil {
+			d.captureMutex.Unlock()
+			// handle 已关闭，移除查询映射
+			d.queryMapMutex.Lock()
+			delete(d.queryMap, dnsID)
+			d.queryMapMutex.Unlock()
+			d.removeRequestFromCache(domain)
+			return fmt.Errorf("handle is closed")
+		}
+		err = d.handle.WritePacketData(buffer.Bytes())
+		d.captureMutex.Unlock()
+		
+		if err != nil {
+			// 发送失败，移除查询映射
+			d.queryMapMutex.Lock()
+			delete(d.queryMap, dnsID)
+			d.queryMapMutex.Unlock()
+			// 从请求缓存中移除
+			d.removeRequestFromCache(domain)
+			continue
+		}
 	}
 	return nil
-}
-
-// 处理DNS结果
-func (d *DnsDiscovery) handleDnsResponse(packet gopacket.Packet) {
-	// 解析DNS响应
-	dnsLayer := packet.Layer(layers.LayerTypeDNS)
-	if dnsLayer == nil {
-		return
-	}
-	dns, _ := dnsLayer.(*layers.DNS)
-	if !dns.QR {
-		return
-	}
-	// 获取查询ID
-	id := dns.ID
-	// 获取查询域名
-	d.queryMapMutex.RLock()
-	domain, ok := d.queryMap[id]
-	d.queryMapMutex.RUnlock()
-	if !ok {
-		return
-	}
-	// 从查询映射中移除
-	d.queryMapMutex.Lock()
-	delete(d.queryMap, id)
-	d.queryMapMutex.Unlock()
-
-	// 从请求缓存中移除
-	d.removeRequestFromCache(domain)
-
-	// 处理DNS响应
-	// ...其余代码保持不变
 }
 
 // 添加一个全局实例获取函数
