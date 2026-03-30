@@ -29,7 +29,7 @@ func TestSingleDomainScan(t *testing.T) {
 	// 验证结果
 	t.Logf("扫描域名 %s 发现 %d 个子域名", domain, len(results))
 	for _, result := range results {
-		t.Logf("  域名: %s, IP: %v, CNAME: %s", result.Domain, result.IP, result.CNAME)
+		t.Logf("  域名: %s, IP: %v", result.Domain, result.IP)
 	}
 	// 验证扫描是否成功完成
 	if len(results) == 0 {

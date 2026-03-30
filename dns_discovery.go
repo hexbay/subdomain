@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math/rand"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -14,20 +15,12 @@ import (
 
 const DNsType = "a"
 
-// DNSRecord 表示单条 DNS 记录
-type DNSRecord struct {
-	Type  string `json:"type"`            // 记录类型: A, AAAA, CNAME, MX, NS, TXT, SOA 等
-	Value string `json:"value"`           // 记录值
-	TTL   uint32 `json:"ttl,omitempty"`   // TTL 值
-}
-
 // DnsResult 表示DNS查询结果
 type DnsResult struct {
-	Domain  string       `json:"domain"`             // 域名
-	IP      []string     `json:"ip,omitempty"`       // IP地址（兼容旧版本）
-	CNAME   string       `json:"cname,omitempty"`    // CNAME记录（兼容旧版本）
-	Records []DNSRecord  `json:"records,omitempty"`  // 所有 DNS 记录
-	QueryID uint16       `json:"query_id,omitempty"` // DNS查询ID，用于关联请求和响应
+	Domain  string   `json:"domain"`           // 域名
+	IP      []string `json:"ip,omitempty"`     // IP地址列表
+	Type    string   `json:"type,omitempty"`   // DNS记录类型（A 或 AAAA）
+	QueryID uint16   `json:"-"`                // DNS查询ID（内部使用，不序列化）
 }
 
 // DomainCallback 定义发现域名时的回调函数类型
@@ -275,9 +268,8 @@ func (c *BatchResultCollector) Collect(result *DnsResult) {
 	// 检查是否已存在该域名
 	existing, exists := c.resultMap[result.Domain]
 	if exists {
-		// 合并结果
+		// 合并 IP 地址
 		if len(result.IP) > 0 {
-			// 添加新的IP地址
 			for _, ip := range result.IP {
 				// 检查IP是否已存在
 				ipExists := false
@@ -292,10 +284,18 @@ func (c *BatchResultCollector) Collect(result *DnsResult) {
 				}
 			}
 		}
-		if result.CNAME != "" {
-			existing.CNAME = result.CNAME
+		// 合并 Type 字段
+		if result.Type != "" && result.Type != existing.Type {
+			if existing.Type == "" {
+				existing.Type = result.Type
+			} else if existing.Type != result.Type {
+				// 如果类型不同，合并显示（例如：A,AAAA）
+				if !strings.Contains(existing.Type, result.Type) {
+					existing.Type = existing.Type + "," + result.Type
+				}
+			}
 		}
-		c.resultMap[result.Domain] = existing
+		// 注意：existing 是指针，修改后自动反映到 resultMap 中，无需重新赋值
 
 		// 执行回调
 		if c.callback != nil {
@@ -738,64 +738,18 @@ func (d *DnsDiscovery) capturePackets() {
 				d.queryMapMutex.RLock()
 				d.queryMapMutex.RUnlock()
 
-				// 解析 DNS 记录
+				// 解析 DNS 记录，只提取 IP 地址
 				switch answer.Type {
 				case layers.DNSTypeA:
-					ipStr := answer.IP.String()
-					result.IP = append(result.IP, ipStr)
-					result.Records = append(result.Records, DNSRecord{
-						Type:  "A",
-						Value: ipStr,
-						TTL:   answer.TTL,
-					})
-				case layers.DNSTypeAAAA:
-					ipStr := answer.IP.String()
-					result.IP = append(result.IP, ipStr)
-					result.Records = append(result.Records, DNSRecord{
-						Type:  "AAAA",
-						Value: ipStr,
-						TTL:   answer.TTL,
-					})
-				case layers.DNSTypeCNAME:
-					cnameStr := string(answer.CNAME)
-					result.CNAME = cnameStr
-					result.Records = append(result.Records, DNSRecord{
-						Type:  "CNAME",
-						Value: cnameStr,
-						TTL:   answer.TTL,
-					})
-				case layers.DNSTypeMX:
-					result.Records = append(result.Records, DNSRecord{
-						Type:  "MX",
-						Value: string(answer.MX.Name),
-						TTL:   answer.TTL,
-					})
-				case layers.DNSTypeNS:
-					result.Records = append(result.Records, DNSRecord{
-						Type:  "NS",
-						Value: string(answer.NS),
-						TTL:   answer.TTL,
-					})
-				case layers.DNSTypeTXT:
-					for _, txt := range answer.TXTs {
-						result.Records = append(result.Records, DNSRecord{
-							Type:  "TXT",
-							Value: string(txt),
-							TTL:   answer.TTL,
-						})
+					if answer.IP != nil {
+						result.IP = append(result.IP, answer.IP.String())
+						result.Type = "A"
 					}
-				case layers.DNSTypeSOA:
-					result.Records = append(result.Records, DNSRecord{
-						Type:  "SOA",
-						Value: string(answer.SOA.MName),
-						TTL:   answer.TTL,
-					})
-				case layers.DNSTypePTR:
-					result.Records = append(result.Records, DNSRecord{
-						Type:  "PTR",
-						Value: string(answer.PTR),
-						TTL:   answer.TTL,
-					})
+				case layers.DNSTypeAAAA:
+					if answer.IP != nil {
+						result.IP = append(result.IP, answer.IP.String())
+						result.Type = "AAAA"
+					}
 				}
 
 				// 将结果发送到收集器
